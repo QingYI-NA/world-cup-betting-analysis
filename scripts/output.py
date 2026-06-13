@@ -1,5 +1,6 @@
 """
 输出层：控制台格式化输出 + JSON/CSV 持久化
+v4: 中文名 + 多盘口建议
 """
 
 import json
@@ -7,15 +8,14 @@ import csv
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from config import (
-    ANALYSIS_DIR, WEIGHTS, DISCLAIMER, TOURNAMENT,
-)
+from config import ANALYSIS_DIR, DISCLAIMER, TOURNAMENT
+from names import cn, venue_cn, home_away_label
+from betting_advice import generate_advice
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 def _utc_to_beijing(utc_str):
-    """UTC ISO 时间 → 北京时间字符串"""
     if not utc_str:
         return "时间待定"
     try:
@@ -27,147 +27,84 @@ def _utc_to_beijing(utc_str):
         return utc_str[:16].replace("T", " ")
 
 
-def _generate_all_tiers(probs, risk_level):
-    """
-    生成三级方案：小额 / 稳健 / 博高赔
-    返回 list of dict
-    """
-    max_idx = probs.index(max(probs))
-    labels = ["主胜", "平局", "客胜"]
-    tiers = []
-
-    # 小额娱乐档（永远推荐）
-    tiers.append({
-        "tier": "🥉 小额娱乐",
-        "amount": "10-30元",
-        "suggestion": f"单关 {labels[max_idx]}",
-    })
-
-    # 稳健尝试档（中低风险才推荐）
-    if risk_level in ("低风险", "中风险"):
-        if risk_level == "低风险":
-            tiers.append({
-                "tier": "🥈 稳健尝试",
-                "amount": "30-80元",
-                "suggestion": f"2串1（{labels[max_idx]} + 另一场低风险）",
-            })
-        else:
-            direction = "胜+平" if probs[0] > probs[2] else "平+负"
-            tiers.append({
-                "tier": "🥈 稳健尝试",
-                "amount": "20-50元",
-                "suggestion": f"双选 {direction}",
-            })
-
-    # 博高赔档（高风险才推荐跳过）
-    if risk_level == "高风险":
-        tiers.append({
-            "tier": "🥇 博高赔",
-            "amount": f"≤10元",
-            "suggestion": f"娱乐单关最高赔（10元以内）",
-        })
-        tiers.append({"tier": "⚠️ 风险提示", "amount": "", "suggestion": "冷门概率高，不建议重注"})
-    else:
-        tiers.append({
-            "tier": "🥇 博高赔",
-            "amount": "10-20元",
-            "suggestion": f"搏冷门 {labels[2 - max_idx]}（小注娱乐）",
-        })
-
-    return tiers
+def _format_bar(home_score, away_score, width=16):
+    """可视化得分条"""
+    total = max(home_score + away_score, 0.1)
+    h_bar = int(home_score / total * width)
+    a_bar = width - h_bar
+    return f"{'█' * h_bar}{'░' * a_bar}"
 
 
 def format_console_report(results):
-    """
-    格式化控制台输出。
-    results: list of analyze_match() 返回值
-    """
     lines = []
-    sep = "=" * 52
+    sep = "=" * 54
 
-    for i, r in enumerate(results):
+    for r in results:
         match = r["match"]
-        home = r["home"]
-        away = r["away"]
+        home = match["home"]
+        away = match["away"]
+        home_cn = cn(home)
+        away_cn = cn(away)
+
         kickoff = _utc_to_beijing(match.get("kickoff", ""))
         stage = match.get("stage", "").replace("GROUP_STAGE", "小组赛").replace("KNOCKOUT_STAGE", "淘汰赛")
+        venue_id = match.get("venue_id", "")
+        venue_name = venue_cn(venue_id) if venue_id else ""
 
         lines.append(sep)
         lines.append(f"  {kickoff}")
-        lines.append(f"  {home} vs {away}（{stage}）")
+        lines.append(f"  🏠 {home_cn}  vs  ✈️ {away_cn}   {stage}")
+        if venue_name:
+            lines.append(f"  📍 {venue_name}")
         lines.append(sep)
 
         # 数据状态
         ds = r.get("data_status", {})
-        status_icons = []
+        icons = []
         for k, v in ds.items():
-            icon = "✅" if v in ("ok", "api", "csv_fresh") else ("⚠️" if v in ("csv_stale", "cache_stale", "partial") else "❌")
-            status_icons.append(f"{k}={v}")
-        lines.append(f"  [数据] {' | '.join(status_icons)}")
+            icon = "✅" if v in ("ok", "api", "csv_fresh", "mcp") else (
+                   "⚠️" if v in ("csv_stale", "cache_stale", "partial") else "❌")
+            icons.append(f"{k}={v}")
+        lines.append(f"  [数据] {' | '.join(icons)}")
 
-        # 六维度得分
-        dims = r.get("dimension_scores", {})
-        sh = dims.get("home", {})
-        sa = dims.get("away", {})
-        dim_labels = {
-            "team_strength": "硬实力",
-            "recent_form": "近状态",
-            "injuries": "伤停  ",
-            "head_to_head": "交锋  ",
-            "external": "场外  ",
-            "odds_market": "赔率  ",
-        }
-        lines.append(f"  [六维得分]")
-        for dim, label in dim_labels.items():
-            h_score = sh.get(dim, 5)
-            a_score = sa.get(dim, 5)
-            extra = ""
-            if dim == "injuries":
-                raw = r.get("raw", {})
-                hn = raw.get("injuries_home", "?")
-                an = raw.get("injuries_away", "?")
-                if hn != "无" and hn != "?":
-                    extra = f"[{home}:{hn}]"
-                if an != "无" and an != "?":
-                    extra += f" [{away}:{an}]"
-            elif dim == "head_to_head":
-                raw = r.get("raw", {})
-                h2h_info = raw.get("h2h", "")
-                if h2h_info and h2h_info != "无数据":
-                    extra = f"({h2h_info})"
-            elif dim == "odds_market":
-                raw = r.get("raw", {})
-                oi = raw.get("odds_implied", "")
-                if oi and oi != "无赔率数据":
-                    extra = f"[{oi}]"
-            line = f"    {label}: {home} {h_score:.1f}  vs  {away} {a_score:.1f}"
-            if extra:
-                line += f"  {extra}"
-            lines.append(line)
-
-        # 综合概率
+        # 核心指标行
         probs = r.get("probabilities", {})
-        ph = probs.get('home_win', 0)
-        pd = probs.get('draw', 0)
-        pa = probs.get('away_win', 0)
-        lines.append(f"  [概率] 主 {ph:.0%}  |  平 {pd:.0%}  |  客 {pa:.0%}")
-
-        # 风险
-        risk = r.get("risk_level", "未知")
+        ph, pd, pa = probs.get('home_win', 0), probs.get('draw', 0), probs.get('away_win', 0)
+        risk = r.get("risk_level", "")
         risk_icon = {"低风险": "🟢", "中风险": "🟡", "高风险": "🔴"}.get(risk, "⚪")
-        lines.append(f"  [风险] {risk_icon} {risk}")
 
-        # 一句话结论
-        lines.append(f"  [结论] {r.get('oneliner', '')}")
+        raw = r.get("raw", {})
+        rh, ra = raw.get("rank_home", "?"), raw.get("rank_away", "?")
+        inj_h = raw.get("injuries_home", "无")
+        inj_a = raw.get("injuries_away", "无")
+        odds_info = raw.get("odds_implied", "")
+
+        lines.append(f"  FIFA: #{rh} vs #{ra}  |  概率: 主{ph:.0%} 平{pd:.0%} 客{pa:.0%}  |  {risk_icon} {risk}")
+        if inj_h != "无" or inj_a != "无":
+            lines.append(f"  伤停: {home_cn}[{inj_h}]  {away_cn}[{inj_a}]")
+        if odds_info and odds_info != "无赔率数据":
+            lines.append(f"  赔率隐含: {odds_info}")
+
+        # 一句话
+        lines.append(f"  💬 {r.get('oneliner', '')}")
+
+        # ===== 多盘口建议 =====
+        advice = generate_advice(r)
+        lines.append(f"  {'─' * 40}")
+        lines.append(f"  [投注建议]")
+        lines.append(f"  胜平负:  {advice['win_draw_loss']}")
+        lines.append(f"  让球盘:  {advice['asian_handicap']}")
+        lines.append(f"  大小球:  {advice['over_under']}")
+        lines.append(f"  双方进球:{advice['btts']}")
+        lines.append(f"  半全场:  {advice['ht_ft']}")
+        lines.append(f"  波胆参考:{advice['score_hint']}")
 
         # 三级方案
-        tiers = _generate_all_tiers([ph, pd, pa], risk)
-        lines.append(f"  [方案]")
-        for t in tiers:
+        lines.append(f"  {'─' * 40}")
+        lines.append(f"  [分层方案]")
+        for t in advice.get("tiers", []):
             amt = f"({t['amount']})" if t['amount'] else ""
             lines.append(f"    {t['tier']}: {t['suggestion']} {amt}")
-        for w in r.get("proposal", {}).get("warnings", []):
-            lines.append(f"    ⚠ {w}")
 
         lines.append("")
 
@@ -175,14 +112,11 @@ def format_console_report(results):
     lines.append(sep)
     lines.append(f"  分析: {datetime.now().strftime('%Y-%m-%d %H:%M')} 北京时间 | {TOURNAMENT}")
     lines.append("")
-
     return "\n".join(lines)
 
 
 def format_compact_report(results):
-    """
-    紧凑版输出（适合飞书推送）。
-    """
+    """紧凑版（飞书推送）"""
     if not results:
         return "⚽ 今日无世界杯比赛"
 
@@ -191,22 +125,31 @@ def format_compact_report(results):
     for r in results:
         home = r["home"]
         away = r["away"]
+        home_cn = cn(home)
+        away_cn = cn(away)
         probs = r.get("probabilities", {})
         risk = r.get("risk_level", "")
         risk_icon = {"低风险": "🟢", "中风险": "🟡", "高风险": "🔴"}.get(risk, "⚪")
         kickoff = _utc_to_beijing(r["match"].get("kickoff", ""))
+        venue_id = r["match"].get("venue_id", "")
+        venue_name = venue_cn(venue_id) if venue_id else ""
+        raw = r.get("raw", {})
 
-        ph = probs.get("home_win", 0)
-        pd = probs.get("draw", 0)
-        pa = probs.get("away_win", 0)
-
-        lines.append(f"{risk_icon} {home} vs {away}")
+        ph, pd, pa = probs.get('home_win', 0), probs.get('draw', 0), probs.get('away_win', 0)
+        lines.append(f"{risk_icon} {home_cn} vs {away_cn}")
         lines.append(f"   ⏰ {kickoff}")
-        lines.append(f"   📊 主{ph:.0%} 平{pd:.0%} 客{pa:.0%}")
-        lines.append(f"   💬 {r.get('oneliner', '')}")
+        if venue_name:
+            lines.append(f"   📍 {venue_name}")
+        rh, ra = raw.get("rank_home", "?"), raw.get("rank_away", "?")
+        lines.append(f"   FIFA #{rh} vs #{ra}  |  主{ph:.0%} 平{pd:.0%} 客{pa:.0%}")
 
-        tiers = _generate_all_tiers([ph, pd, pa], risk)
-        for t in tiers:
+        # 多盘口精简版
+        advice = generate_advice(r)
+        lines.append(f"   胜平负: {advice['win_draw_loss']}")
+        lines.append(f"   让球: {advice['asian_handicap']}")
+        lines.append(f"   大小球: {advice['over_under']}")
+
+        for t in advice.get("tiers", []):
             amt = f" ({t['amount']})" if t['amount'] else ""
             lines.append(f"   {t['tier']}: {t['suggestion']}{amt}")
 
@@ -217,11 +160,9 @@ def format_compact_report(results):
 
 
 def save_results(results):
-    """持久化分析结果到 JSON 和 CSV"""
     date_str = datetime.now().strftime("%Y-%m-%d")
     basename = f"analysis_{date_str}"
 
-    # JSON
     json_path = ANALYSIS_DIR / f"{basename}.json"
     existing = []
     if json_path.exists():
@@ -234,7 +175,6 @@ def save_results(results):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2, default=str)
 
-    # CSV
     csv_path = ANALYSIS_DIR / f"{basename}.csv"
     csv_exists = csv_path.exists()
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
@@ -251,8 +191,8 @@ def save_results(results):
             proposal = r.get("proposal", {})
             writer.writerow({
                 "北京时间": _utc_to_beijing(r["match"].get("kickoff", "")),
-                "主队": r["home"],
-                "客队": r["away"],
+                "主队": cn(r["home"]),
+                "客队": cn(r["away"]),
                 "阶段": r["match"].get("stage", ""),
                 "主胜概率": probs.get("home_win", 0),
                 "平局概率": probs.get("draw", 0),
