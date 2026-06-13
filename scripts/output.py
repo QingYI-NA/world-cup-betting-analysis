@@ -11,6 +11,7 @@ from pathlib import Path
 from config import ANALYSIS_DIR, DISCLAIMER, TOURNAMENT
 from names import cn, venue_cn, home_away_label
 from betting_advice import generate_advice
+from daily_summary import generate_daily_bets, format_daily_bets
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -111,6 +112,11 @@ def format_console_report(results):
     lines.append(f"  {DISCLAIMER}")
     lines.append(sep)
     lines.append(f"  分析: {datetime.now().strftime('%Y-%m-%d %H:%M')} 北京时间 | {TOURNAMENT}")
+
+    # 每日三注总结
+    bets = generate_daily_bets(results)
+    lines.append(format_daily_bets(bets))
+
     lines.append("")
     return "\n".join(lines)
 
@@ -156,6 +162,22 @@ def format_compact_report(results):
         lines.append("")
 
     lines.append(f"--- {DISCLAIMER}")
+
+    # 每日三注
+    bets = generate_daily_bets(results)
+    if bets:
+        lines.append("")
+        lines.append("📋 今日三注 — 照此下单:")
+        p = bets.get("parlay", {})
+        if p.get("picks"):
+            lines.append(f"  ① {p['type']}: {', '.join(p['matches'])} ({p.get('amount','')})")
+        s = bets.get("single", {})
+        if s.get("pick"):
+            lines.append(f"  ② 单关: {s['match']} [{s['pick']}] ({s.get('amount','')})")
+        m = bets.get("mixed", {})
+        if m.get("leg1"):
+            lines.append(f"  ③ 混合: {m.get('leg1','')} → {m.get('amount','')}")
+
     return "\n".join(lines)
 
 
