@@ -1,201 +1,180 @@
 """
-每日三注推荐：串关 + 单关 + 混合
-基于当日所有比赛的综合分析，生成可直接下单的三注方案
+每日串关推荐：基于每场最佳盘口，构建综合串关
 """
 
 from names import cn
 
 
-def generate_daily_bets(results):
+def build_parlay(results):
     """
-    输入: list of analyze_match() 返回值
-    输出: dict with parlay, single, mixed recommendations
+    从所有比赛中挑选最佳盘口，构建串关。
+    只选置信度足够的场次。
+    返回 dict 或 None
     """
-    if not results:
+    if len(results) < 2:
         return None
 
-    # 按"赢面"排序（概率 × 风险系数）
-    scored = []
+    picks = []
     for r in results:
-        probs = r["probabilities"]
-        max_prob = max(probs["home_win"], probs["draw"], probs["away_win"])
-        max_idx = [probs["home_win"], probs["draw"], probs["away_win"]].index(max_prob)
-        labels = ["主胜", "平局", "客胜"]
+        pick = _pick_best_market(r)
+        if pick:
+            picks.append(pick)
 
-        # 风险系数：低=1.0, 中=0.85, 高=0.6
-        risk = r["risk_level"]
-        risk_factor = {"低风险": 1.0, "中风险": 0.85, "高风险": 0.6}.get(risk, 0.7)
+    if len(picks) < 2:
+        return None
 
-        # 赢面分 = 概率 × 风险系数
-        confidence = max_prob * risk_factor
+    # 按置信度排序，取前4场
+    picks.sort(key=lambda x: x["confidence"], reverse=True)
+    selected = picks[:4]  # 最多4串1
 
-        scored.append({
-            "result": r,
-            "max_prob": max_prob,
-            "max_label": labels[max_idx],
-            "risk": risk,
-            "confidence": confidence,
-            "home": r["home"],
-            "away": r["away"],
-            "home_cn": cn(r["home"]),
-            "away_cn": cn(r["away"]),
+    total_conf = sum(p["confidence"] for p in selected) / len(selected)
+
+    if total_conf >= 0.50:
+        label = "⭐ 稳胆串关"
+        amount = "50-100元"
+    elif total_conf >= 0.35:
+        label = "📌 精选串关"
+        amount = "30-50元"
+    else:
+        label = "🎯 娱乐串关"
+        amount = "10-20元"
+
+    return {
+        "label": label,
+        "type": f"{len(selected)}串1",
+        "picks": selected,
+        "amount": amount,
+        "total_confidence": total_conf,
+    }
+
+
+def _pick_best_market(result):
+    """
+    从一场比赛中选择最有投注价值的盘口。
+    返回 dict 或 None（该场不值得投注）
+    """
+    probs = [
+        result["probabilities"]["home_win"],
+        result["probabilities"]["draw"],
+        result["probabilities"]["away_win"],
+    ]
+    risk = result["risk_level"]
+    scores = result.get("dimension_scores", {})
+    sh = scores.get("home", {})
+    sa = scores.get("away", {})
+    total = result.get("total_scores", {})
+    h_total = total.get("home", 5)
+    a_total = total.get("away", 5)
+    strength_gap = h_total - a_total
+
+    home_cn = cn(result["home"])
+    away_cn = cn(result["away"])
+    max_prob = max(probs)
+    max_idx = probs.index(max_prob)
+    labels = ["主胜", "平局", "客胜"]
+
+    # 高风险场次：不选入串关
+    if risk == "高风险":
+        return None
+
+    candidates = []
+
+    # 候选1: 胜平负（概率最高选项）
+    if max_prob >= 0.38:
+        candidates.append({
+            "market": "胜平负",
+            "pick": labels[max_idx],
+            "odds_note": f"概率{max_prob:.0%}",
+            "confidence": max_prob * 0.85,
         })
 
-    scored.sort(key=lambda x: x["confidence"], reverse=True)
-
-    # 过滤掉高风险场次
-    safe = [s for s in scored if s["risk"] != "高风险"]
-    all_bets = safe if safe else scored  # 如果全是高风险就用全部
-
-    bets = {}
-
-    # ============================================================
-    # 1. 串关推荐 (2串1 或 3串1)
-    # ============================================================
-    if len(all_bets) >= 3 and all_bets[0]["confidence"] >= 0.35:
-        top3 = all_bets[:3]
-        combo = " + ".join(
-            f'{cn(b["home"])}vs{cn(b["away"])} [{b["max_label"]}]'
-            for b in top3
-        )
-        total_conf = sum(b["confidence"] for b in top3) / 3
-        if total_conf >= 0.50:
-            amount = "30-50元"
-            label = "⭐ 稳胆3串1"
+    # 候选2: 让球盘（实力差明显时）
+    if abs(strength_gap) >= 1.0:
+        if strength_gap >= 1.0:
+            candidates.append({
+                "market": "让球盘",
+                "pick": f"{home_cn} -0.5",
+                "odds_note": f"让半球",
+                "confidence": min(0.55 + abs(strength_gap) * 0.05, 0.75),
+            })
         else:
-            amount = "20-30元"
-            label = "📌 进取3串1"
+            candidates.append({
+                "market": "让球盘",
+                "pick": f"{away_cn} -0.5",
+                "odds_note": f"让半球",
+                "confidence": min(0.55 + abs(strength_gap) * 0.05, 0.75),
+            })
 
-        bets["parlay"] = {
-            "type": "3串1",
-            "label": label,
-            "picks": combo,
-            "amount": amount,
-            "matches": [f'{cn(b["home"])} {b["max_label"]}' for b in top3],
-        }
-    elif len(all_bets) >= 2:
-        top2 = all_bets[:2]
-        combo = " + ".join(
-            f'{cn(b["home"])}vs{cn(b["away"])} [{b["max_label"]}]'
-            for b in top2
-        )
-        bets["parlay"] = {
-            "type": "2串1",
-            "label": "⭐ 稳胆2串1",
-            "picks": combo,
-            "amount": "30-80元",
-            "matches": [f'{cn(b["home"])} {b["max_label"]}' for b in top2],
-        }
-    else:
-        bets["parlay"] = {
-            "type": "—",
-            "label": "今日场次不足，不推荐串关",
-            "picks": "",
-            "amount": "",
-            "matches": [],
-        }
+    # 候选3: 大小球（强弱分明或伤停严重时）
+    h_injury = sh.get("injuries", 10)
+    a_injury = sa.get("injuries", 10)
+    o_score = sh.get("odds_market", 5)
+    d_score = sa.get("odds_market", 5)
 
-    # ============================================================
-    # 2. 单关推荐（最有信心的单场）
-    # ============================================================
-    if all_bets:
-        best = all_bets[0]
-        home_cn = cn(best["home"])
-        away_cn = cn(best["away"])
+    if o_score >= 7 and d_score <= 3:
+        candidates.append({
+            "market": "大小球",
+            "pick": "小 2.5球",
+            "odds_note": "强队控场",
+            "confidence": 0.50,
+        })
+    elif h_injury <= 3 or a_injury <= 3:
+        candidates.append({
+            "market": "大小球",
+            "pick": "小 2.5球",
+            "odds_note": "核心缺阵",
+            "confidence": 0.48,
+        })
 
-        if best["risk"] == "低风险" and best["max_prob"] >= 0.55:
-            amount = "50-100元"
-            label = "💎 今日重心单关"
-        elif best["risk"] == "低风险":
-            amount = "30-50元"
-            label = "⭐ 稳健单关"
-        elif best["confidence"] >= 0.35:
-            amount = "20-30元"
-            label = "📌 精选单关"
-        else:
-            amount = "10-20元"
-            label = "🎯 娱乐单关"
+    # 候选4: 双方进球（实力接近时）
+    if abs(strength_gap) < 0.5 and h_injury >= 8 and a_injury >= 8:
+        candidates.append({
+            "market": "双方进球",
+            "pick": "是",
+            "odds_note": "实力接近",
+            "confidence": 0.45,
+        })
 
-        bets["single"] = {
-            "label": label,
-            "match": f"{home_cn} vs {away_cn}",
-            "pick": f"{best['max_label']}",
-            "odds_hint": f"概率{best['max_prob']:.0%}",
-            "amount": amount,
-        }
-    else:
-        bets["single"] = {"label": "今日不建议单关", "match": "", "pick": "", "amount": ""}
+    if not candidates:
+        return None
 
-    # ============================================================
-    # 3. 混合推荐（单关 + 小串 或 双选组合）
-    # ============================================================
-    if len(all_bets) >= 2:
-        best = all_bets[0]
-        second = all_bets[1]
-        home1, away1 = cn(best["home"]), cn(best["away"])
-        home2, away2 = cn(second["home"]), cn(second["away"])
+    # 选置信度最高的
+    best = max(candidates, key=lambda x: x["confidence"])
 
-        # 主推的单关 + 第二场的双选防平
-        probs2 = second["result"]["probabilities"]
-        dir2 = "胜+平" if probs2["home_win"] > probs2["away_win"] else "平+负"
+    # 低置信度不选
+    if best["confidence"] < 0.35:
+        return None
 
-        bets["mixed"] = {
-            "label": "🔄 混合过关",
-            "description": f"单关+双选组合",
-            "leg1": f"① 单关: {home1}vs{away1} [{best['max_label']}]",
-            "leg2": f"② 双选: {home2}vs{away2} [{dir2}]",
-            "amount": "30-50元",
-        }
-    else:
-        bets["mixed"] = {"label": "今日场次不足", "description": "", "amount": ""}
-
-    return bets
+    return {
+        "match": f"{home_cn} vs {away_cn}",
+        "market": best["market"],
+        "pick": best["pick"],
+        "odds_note": best["odds_note"],
+        "confidence": best["confidence"],
+    }
 
 
-def format_daily_bets(bets):
-    """格式化为输出文本"""
-    if not bets:
+def format_parlay(parlay):
+    """格式化串关输出"""
+    if not parlay:
         return ""
 
     lines = []
     lines.append("")
     lines.append("╔══════════════════════════════════╗")
-    lines.append("║     📋 今日三注 — 直接下单       ║")
+    lines.append("║       📋 今日串关推荐             ║")
     lines.append("╚══════════════════════════════════╝")
     lines.append("")
 
-    # 串关
-    p = bets.get("parlay", {})
-    lines.append(f"  【第一注】{p.get('label', '')}")
-    lines.append(f"  类型: {p.get('type', '')}")
-    lines.append(f"  选项: {p.get('picks', '')}")
-    if p.get('amount'):
-        lines.append(f"  金额: {p.get('amount', '')}")
-    lines.append("")
+    for i, p in enumerate(parlay["picks"], 1):
+        lines.append(f"  {i}. {p['match']}")
+        lines.append(f"     [{p['market']}] {p['pick']}  ({p['odds_note']})")
 
-    # 单关
-    s = bets.get("single", {})
-    lines.append(f"  【第二注】{s.get('label', '')}")
-    lines.append(f"  场次: {s.get('match', '')}")
-    lines.append(f"  选项: {s.get('pick', '')} ({s.get('odds_hint', '')})")
-    if s.get('amount'):
-        lines.append(f"  金额: {s.get('amount', '')}")
     lines.append("")
-
-    # 混合
-    m = bets.get("mixed", {})
-    lines.append(f"  【第三注】{m.get('label', '')}")
-    lines.append(f"  {m.get('description', '')}")
-    if m.get('leg1'):
-        lines.append(f"  {m.get('leg1', '')}")
-    if m.get('leg2'):
-        lines.append(f"  {m.get('leg2', '')}")
-    if m.get('amount'):
-        lines.append(f"  金额: {m.get('amount', '')}")
+    lines.append(f"  {parlay['label']}: {parlay['type']}")
+    lines.append(f"  金额: {parlay['amount']}")
     lines.append("")
-
-    lines.append("  ────────────────────────────────")
-    lines.append("  💡 打开体彩App → 选择对应场次 → 照此下单")
+    lines.append("  💡 打开体彩App → 串关投注 → 照此选择")
     lines.append("")
 
     return "\n".join(lines)

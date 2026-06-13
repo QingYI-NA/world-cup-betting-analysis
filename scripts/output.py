@@ -11,7 +11,7 @@ from pathlib import Path
 from config import ANALYSIS_DIR, DISCLAIMER, TOURNAMENT
 from names import cn, venue_cn, home_away_label
 from betting_advice import generate_advice
-from daily_summary import generate_daily_bets, format_daily_bets
+from daily_summary import build_parlay, format_parlay
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -113,9 +113,9 @@ def format_console_report(results):
     lines.append(sep)
     lines.append(f"  分析: {datetime.now().strftime('%Y-%m-%d %H:%M')} 北京时间 | {TOURNAMENT}")
 
-    # 每日三注总结
-    bets = generate_daily_bets(results)
-    lines.append(format_daily_bets(bets))
+    # 每日串关推荐
+    parlay = build_parlay(results)
+    lines.append(format_parlay(parlay))
 
     lines.append("")
     return "\n".join(lines)
@@ -163,20 +163,14 @@ def format_compact_report(results):
 
     lines.append(f"--- {DISCLAIMER}")
 
-    # 每日三注
-    bets = generate_daily_bets(results)
-    if bets:
+    # 串关推荐
+    parlay = build_parlay(results)
+    if parlay:
         lines.append("")
-        lines.append("📋 今日三注 — 照此下单:")
-        p = bets.get("parlay", {})
-        if p.get("picks"):
-            lines.append(f"  ① {p['type']}: {', '.join(p['matches'])} ({p.get('amount','')})")
-        s = bets.get("single", {})
-        if s.get("pick"):
-            lines.append(f"  ② 单关: {s['match']} [{s['pick']}] ({s.get('amount','')})")
-        m = bets.get("mixed", {})
-        if m.get("leg1"):
-            lines.append(f"  ③ 混合: {m.get('leg1','')} → {m.get('amount','')}")
+        lines.append(f"📋 今日串关 ({parlay['type']}):")
+        for p in parlay["picks"]:
+            lines.append(f"  {p['match']} [{p['market']}] {p['pick']}")
+        lines.append(f"  💰 {parlay['amount']}")
 
     return "\n".join(lines)
 

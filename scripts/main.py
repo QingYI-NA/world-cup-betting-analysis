@@ -23,17 +23,19 @@ if "uv" in _pyhome.lower() or "cpython-3.11" in _pyhome:
 
 import argparse
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # Add parent scripts dir to path so imports work from cron
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
-    LOG_DIR, DISCLAIMER, FEISHU_TARGET,
+    LOG_DIR, DISCLAIMER,
 )
 from fetch_data import fetch_schedule, collect_match_data
 from analyze import analyze_match
 from output import format_console_report, format_compact_report, save_results
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,19 +48,59 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
+def _utc_to_beijing(utc_str):
+    """UTC 时间 → 北京时间日期"""
+    try:
+        s = utc_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(s).astimezone(BEIJING_TZ)
+    except Exception:
+        return None
+
+
 def run_analysis(date_str=None, match_filter=None):
     """
-    主流程：赛程 → 采集 → 分析 → 输出
-    返回: (results_list, console_output, compact_output)
+    主流程。date_str 为北京时间日期 (YYYY-MM-DD)。
+    自动查询对应 UTC 日期范围，筛选出北京时间当天的比赛。
     """
-    log.info(f"开始分析: date={date_str}, filter={match_filter}")
+    if date_str is None:
+        date_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
-    # 1. 获取赛程
-    matches = fetch_schedule(date_str)
+    log.info(f"开始分析: 北京日期={date_str}, filter={match_filter}")
+
+    # 北京时间一天对应 UTC 范围：
+    # 北京 6/14 00:00 = UTC 6/13 16:00
+    # 北京 6/15 00:00 = UTC 6/14 16:00
+    # 所以查 UTC 6/13 和 6/14 两天，再筛选北京日期
+    bj_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+    utc_start = (bj_date - timedelta(hours=8)).strftime("%Y-%m-%d")
+    utc_end = (bj_date + timedelta(hours=16)).strftime("%Y-%m-%d")
+
+    # 1. 获取赛程（查询跨两天的 UTC 日期）
+    all_matches = []
+    for d in [utc_start, utc_end]:
+        matches = fetch_schedule(d)
+        all_matches.extend(matches)
+
+    # 去重
+    seen = set()
+    unique = []
+    for m in all_matches:
+        mid = m.get("match_id", f"{m['home']}-{m['away']}")
+        if mid not in seen:
+            seen.add(mid)
+            unique.append(m)
+
+    # 筛选北京时间当天的比赛
+    matches = []
+    for m in unique:
+        bj_time = _utc_to_beijing(m.get("kickoff", ""))
+        if bj_time and bj_time.strftime("%Y-%m-%d") == date_str:
+            matches.append(m)
+
     if not matches:
-        msg = f"日期 {date_str} 无世界杯比赛"
+        msg = f"北京时间 {date_str} 无世界杯比赛"
         log.info(msg)
-        return [], f"{msg}。", f"⚽ 今日无世界杯比赛\n\n--- {DISCLAIMER}"
+        return [], f"{msg}。", f"⚽ 北京时间{date_str}无世界杯比赛\n\n--- {DISCLAIMER}"
 
     # 2. 过滤
     if match_filter:
@@ -101,7 +143,7 @@ def main():
 
     args = parser.parse_args()
 
-    date_str = args.date or datetime.now().strftime("%Y-%m-%d")
+    date_str = args.date or datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     results, console_out, compact_out = run_analysis(date_str, args.match)
 
     # 输出
